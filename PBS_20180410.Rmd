@@ -1,0 +1,835 @@
+---
+title: "The Bike Share Lifestyle in Vancouver: Decoding the Demographic Profile of the Super-Users"
+author: "Sana Javaheri"
+date: '2018-04-11'
+output:
+  rmarkdown::html_document:
+    theme: lumen
+    code_folding: hide
+    toc: yes
+    toc_float: yes
+---
+####The aim of this project is to compare demographic and other characteristics of super-users of Vancouver’s public bike share system, defined by members who take at least six trips a week with the system, to regular users, defined by members who make less than six trips per week. 
+
+####This analysis uses two data sources:
+####1) Mobi Member System Data *(n=665116)* - July 19, 2016 to November 16, 2017
+####2) Mobi Member 2017 Survey Data *(n=1400)* - September 22 to October 6, 2017
+
+##Data Preperation 
+####All data was loaded directly from the PBS SFU vault folder. The Mobi Member system data and survey data were linked using the feilds "Account" and "Internal.ID". The metric of "Number of trips per month per user" was also produced as a seperate aggregated table. The top 10% of of members was also selected and labeled into a column. A new binary variable of "User Type" was  created (line 90) to label members who were a "super-user" (1) or "regular user" (0). 
+```{r setup, message = FALSE, warning = FALSE}
+################### PREPARE DATA #####################
+
+# Load libraries  ------------------------------------------------------------------------------------
+
+library(stargazer)
+library(dplyr)
+library(XLConnect)
+library(XLConnectJars)
+library(readxl)
+library(zoo)
+library(mondate)
+library(kableExtra)
+library(knitr)
+library(tidyr)
+library(plotly)
+library(car)
+library(reshape2)
+library(tidyverse)
+library(MASS)
+
+# Import System Data [811474 obs.] [21 variables] -----------------------------------------------------
+df.system <- read_excel("/Users/sanajavaheri/sfuvault/PBS/Data/MobiSystemData/MobiSystemData_20160719_20171116.xlsx")
+
+# Import Survey Data 2017 [1400 obs.] [386 variables] ------------------------------------------------
+df.survey <- read.csv("/Users/sanajavaheri/sfuvault/PBS/Data/MobiMemberSurvey_2017/WORKING_MasterData/MobiMember_SURVEYDATA_2017_MASTER_All_Variables.csv")
+
+# Import Survey Emails 2017 [1743 obs.] [9 variables] ------------------------------------------------
+df.emails <- XLConnect::loadWorkbook("/Users/sanajavaheri/sfuvault/PBS/Data/MobiMemberSurvey_2017/ORIGINAL_DoNotEdit/MobiMember_Survey_2017_ID_Email_Link.xlsx", password = "mobiuser2017")
+df.emails <- readWorksheet(df.emails, "MobiMember_Survey_2017_ID_Email")
+
+# Cleaning "df.system" [811474 obs.] [21 variables] --------------------
+# Removing Manager=="TRUE" [696201 obs.] 
+df.systemclean <-  df.system[df.system$Manager =="FALSE",]
+# Removing Duration <= 60 sec. [665116 obs.] 
+df.systemclean <- subset(df.systemclean, `Duration (sec.)` > 60 )
+
+# New Data Frame to find number of months in the system [42499 obs.] [7 variables] 
+df.systemclean$DepartureDate <- as.Date(df.systemclean$DepartureDate,'%m/%d/%Y')
+
+df.tripdates <- df.systemclean %>% dplyr::select(Account,DepartureDate) %>%
+                    group_by (Account) %>%
+                    summarise('DepartureStart' = min(DepartureDate), 
+                              'DepartureEnd' = max(DepartureDate),
+                              'n' = n()) %>%
+                    mutate('MonthStart' = as.yearmon(DepartureStart),
+                           'MonthEnd' = as.yearmon(DepartureEnd), 
+                           'MonthsInSystem' = (MonthEnd - MonthStart) * 12 + 1, 
+                           'TripsPerMonth' = round(n/MonthsInSystem,2))
+
+# Left Outer Join dfemails + dfTripMonths [1743 obs.] [16 variables]
+df.tripdates.memberid <- left_join(df.emails, df.tripdates, by = c("Invite.Email" = "Account" ))
+
+# Left Join df.rentalsmember.id + dfemail + df.survey [1400 obs.] [395 variables]
+df <- left_join(df.tripdates.memberid, df.survey, by = c("Internal.ID" = "internal_id"))
+
+df <- df[!(is.na(df$status)), ] 
+
+df$Number.for.Prize.Draw <- NULL
+df$ Prize.Winner <- NULL
+df$Contacted <- NULL
+df$Confirmed.would.like.to.receive <- NULL
+df$MEC.Gift.Card.Sent <- NULL
+df$Email.Confirmation <- NULL
+
+# Add ranking to data frame [1400 obs.] [396 variables]
+order.trips <- order(df$TripsPerMonth, decreasing = TRUE)
+df$rank <- NA
+df$rank[order.trips] <- 1:nrow(df)
+
+df$usertype <- NA
+df$usertype[df$rank < 141] <- "Super-Users"
+df$usertype[df$rank > 140] <- "Regular Users"
+
+# Dummy Variable for "Super-Users" vs. "Regular Users"
+df$usertype_dummy <- NA
+df$usertype_dummy[df$usertype == "Super-Users"] <- 1
+df$usertype_dummy[df$usertype =="Regular Users"] <- 0
+df$usertype_dummy <- factor(df$usertype_dummy, levels=c(0, 1))
+
+```
+
+##Recoding Survey Results & Removing NAs
+####Data was filtered to removed all responses with NAs or "I prefer to not answer" except for the variable Income and whether a member lived or worked within 500 m of a docking station. Categories with small cell sizes were merged. Categories were also turned into a factor in preperation for a logistic regression analysis. 
+```{r factor, results = 'asis'}
+
+#Removing NAs
+
+df.clean <- subset(df, q28!="I prefer to not answer")
+df.clean <- subset(df.clean, q27_clean!= 'Other Gender Identity')
+df.clean <- subset(df.clean, q27_clean!= 'I prefer to not answer')   
+df.clean <- subset(df.clean, q29!="Don't know/not sure")
+df.clean <- subset(df.clean, q31_clean!="I prefer to not answer")
+df.clean <- subset(df.clean, q2!="I prefer to not answer")
+df.clean <- subset(df.clean, q2!="Don't know/not sure")
+df.clean <- subset(df.clean, q25_0_0!="I prefer to not answer")
+df.clean <- subset(df.clean, q25_0_1!="I prefer to not answer")
+df.clean <- subset(df.clean, q25_0_3!="I prefer to not answer")
+df.clean <- subset(df.clean, q25_0_4!="I prefer to not answer")
+df.clean$q36 <- sub("^[^']*'","_", df.clean$q36)
+
+# AGE 
+df.clean$q28 <-recode(df.clean$q28,"c('16 - 18','18 - 24','25 - 34')= '16 - 34';
+                                  c('35 - 44','45 - 54')= '35 - 54';
+                                  c('55 - 64','65+') = '55+'")
+
+df.clean$q28 <- factor(df.clean$q28, levels = c("55+",
+                                                "35 - 54",
+                                                "16 - 34"))
+
+# GENDER
+
+df.clean$q27_clean <- factor(df.clean$q27_clean, levels = c("Female",
+                                                            "Male"))
+
+# INCOME
+
+df.clean$q36 <-recode(df.clean$q36,"c('Under $20,000 ','$20,000 - $34,999 ','$35,000 - $49,999 ')='Under $50,000';
+                                    c('$50,000 - $74,999 ','$75,000 - $99,999')='$50,000 - $99,999';
+                                    c('$100,000 - $149,999 ','$150,000 - $199,999 ','Over $200,000 ')='$100,000+';
+                                    c('_t know/not sure', 
+                                                  'I prefer to not answer') = 'No response'")
+
+df.clean$q36 <- factor(df.clean$q36, levels = c( "$100,000+",
+                                                 "$50,000 - $99,999", 
+                                                 "Under $50,000",
+                                                  "No response"
+                                                  ))
+
+# EDUCATION
+df.clean$q29 <-recode(df.clean$q29,"c('Some high school or less', 'Graduated high school')='Highschool or less'")
+df.clean$q29 <- factor(df.clean$q29, levels = c("Graduate degree (e.g., Masters)",
+                                                  "Graduated university",
+                                                  "College/vocational/technical school",
+                                                "Some university",
+                                                  "Highschool or less"))
+
+# Were you born in Canada?
+df.clean$q33 <- factor(df.clean$q33, 
+                 levels = c("Yes",
+                            "No" ))  
+
+
+
+# EMPLOYEMENT 
+
+df.clean$q31_clean <-recode(df.clean$q31_clean,"c('Work part-time','Seasonal/temporary work', 'Work full-time')='Work';
+                                                c('Student','Retired','Homemaker','Unemployed') = 'Other'")
+
+df.clean$q31_clean <- factor(df.clean$q31_clean, levels = c("Work",
+                                                            "Other" ))
+
+#PERCEIVED SAFETY 
+df.clean$q2 <-recode(df.clean$q2,"c('Very safe','Somewhat safe') = 'Safe';
+                                  c('Somewhat dangerous','Very dangerous') = 'Dangerous'")
+                              
+df.clean$q2 <- factor(df.clean$q2, 
+                levels = c("Safe","Neither safe nor unsafe","Dangerous"))
+
+
+
+# DRIVERS LICENSE
+df.clean$q23 <- factor(df.clean$q23, 
+                 levels = c("Yes",
+                           "No"))
+
+# CAR SHARE 
+df.clean$q24_carshare_memb <- factor(df.clean$q24_carshare_memb, 
+                               levels = c(
+                                          "Yes",
+                                          "No"))
+# BICYCLE
+df.clean$q25_0_0 <-recode(df.clean$q25_0_0,"c('0')='No';
+                       c('1', '2', '3', '4', '5', '6', '7', '8', '9', '10', '11', '12')='Yes'")
+df.clean$q25_0_0 <- factor(df.clean$q25_0_0, levels=c("Yes",
+                                                        "No"))
+
+# E-BIKE
+df.clean$q25_0_1 <-recode(df.clean$q25_0_1,"c('0')='No';
+                                            c('1', '2', '3')='Yes'")
+df.clean$q25_0_1 <- factor(df.clean$q25_0_1, levels=c("Yes",
+                                                      "No"))
+
+#How many cars, vans, or trucks are kept in your household?
+df.clean$q25_0_3 <-recode(df.clean$q25_0_3,"c('0')='No';
+                       c('1', '2', '3', '4', '5', '6', '7', '8', '9', '10', '11', '12')='Yes'")
+df.clean$q25_0_3 <- factor(df.clean$q25_0_3, levels=c("Yes",
+                                                        "No"))
+
+#How many motorcycles are kept in your household?
+df.clean$q25_0_4 <-recode(df.clean$q25_0_4,"c('0')='No';
+                       c('1', '2', '3', '4', '5', '6', '7', '8', '9', '10', '11', '12')='Yes'")
+df.clean$q25_0_4 <- factor(df.clean$q25_0_4, levels=c("Yes",
+                                                        "No"))
+
+# HOME inside bike share service area (500m buffers)
+
+#*No=home not located within 500m of a bike share docking station
+#*Yes=home located within 500m of a bike share docking station
+
+df.clean$home_500 <-recode(df.clean$home_500,"c('0')='No';
+                                  c('1')='Yes';
+                                          NA= 'No Response'")
+df.clean$home_500 <- factor(df.clean$home_500, levels=c("No",
+                                            "Yes",
+                                             "No Response"))
+
+## WORK inside bike share service area (500m buffers)
+
+#*0=work not located within 500m of a bike share docking station
+#*1=work located within 500m of a bike share docking station
+#*2=does not work or study
+#*NA=invalid/no information provided about work location
+
+df.clean$work_500 <-recode(df.clean$work_500,"c('0')='No';
+                                  c('1')='Yes';
+                                  c('2') ='No work/study';
+                                           NA= 'No Response'")
+
+df.clean$work_500 <- factor(df.clean$work_500, levels=c("No",
+                                            "Yes",
+                                            "No work/study",
+                                             "No Response"))
+
+```
+***
+
+#Demographics and Other Characteristics of Mobi Member Survey Sample (2017)
+####Distribution of independent variables were analyzed seperately from the outcome variable. A function was setup to build and format the tables created.
+```{r kable_1, results= 'asis'}
+# Create Summary Tables --------------------------------------------------------------------------------------------------
+summarise.survey <- function(df.clean, col) {
+  enquo.col <- enquo(col)
+  df.table <- group_by(df.clean, !!enquo.col) %>%
+  summarise( 'TripsPerMonth' = mean(TripsPerMonth, na.rm = TRUE), 
+            'n' = n())  %>%
+  mutate('percent' = round(n/sum(n)*100,2))
+  colnames(df.table) <- c("Demographics (n = 1,315)", "Trips Per Month", "n", "%")
+  return(df.table)
+} 
+
+kable.style <- function(table) {
+finaltable <- kable(table, digits = 2 ,format = "html") %>%
+kable_styling("striped","hover", full_width = F)  
+return(finaltable)
+} 
+
+```
+###Age
+```{r kable_1Age, results= 'asis'}
+kable.style(summarise.survey(df.clean, q28))
+```
+###Gender
+```{r kable_1Gender, results= 'asis'}
+kable.style(summarise.survey(df.clean, q27_clean)) 
+```
+###Income
+```{r kable_1Income, results= 'asis'}
+kable.style(summarise.survey(df.clean, q36)) 
+```
+###Education
+```{r kable_1Education, results= 'asis'}
+kable.style(summarise.survey(df.clean, q29)) 
+```
+###Were you born in Canada?
+```{r kable_1Born, results= 'asis'}
+kable.style(summarise.survey(df.clean, q33))
+```
+###Employment
+```{r kable_1Employment, results= 'asis'}
+kable.style(summarise.survey(df.clean, q31_clean)) 
+```
+###Perceived Safety
+```{r kable_1PerceivedSafety, results= 'asis'}
+kable.style(summarise.survey(df.clean, q2)) 
+```
+###Do you have a driver's licence?
+```{r kable_1driverslicence, results= 'asis'}
+kable.style(summarise.survey(df.clean, q23)) 
+```
+###Do you have a car share membership? 
+```{r kable_1carshare, results= 'asis'}
+kable.style(summarise.survey(df.clean, q24_carshare_memb))
+```
+###Are there bicycles for adults are kept in your household?
+```{r kable_1bicycle, results= 'asis'}
+kable.style(summarise.survey(df.clean, q25_0_0)) 
+```
+###Are there E-bikes are kept in your household? 
+```{r kable_1ebikes, results= 'asis'}
+kable.style(summarise.survey(df.clean, q25_0_1))
+```
+###Are there cars, vans, or trucks are kept in your household?
+```{r kable_1cars, results= 'asis'}
+kable.style(summarise.survey(df.clean, q25_0_3))
+```
+###Are there motorcycles are kept in your household?
+```{r kable_1motorbikes, results= 'asis'}
+kable.style(summarise.survey(df.clean, q25_0_4))
+```
+###Home inside bike share service area (500m buffers)
+```{r kable_1home, results= 'asis'}
+kable.style(summarise.survey(df.clean, home_500))
+```
+###Work inside bike share service area (500m buffers)
+```{r kable_1work, results= 'asis'}
+kable.style(summarise.survey(df.clean, work_500)) 
+```
+
+***
+#Top 10 Percent VS. Bottom 90 Percent of Trips Taken per Month by Mobi Members
+####Distribution of independent survey variables were analyzed categorized by "super-users" and "regular users". 
+```{r kable_setup, message=FALSE, warning=FALSE, results='asis'}
+summarise.users <- function(df.clean, col) {
+  enquo.col <- enquo(col)
+  df.table <- group_by(df.clean, usertype, !!enquo.col) %>%
+  summarise( 'n' = n())  %>%
+  mutate('percent' = round(n/sum(n)*100,2))
+  colnames(df.table)[2:4] <- c("Q","n", "%")
+  return(df.table)
+} 
+
+table.style <- function(table) {
+colnames(table) <- c("Demographics (n = 1,315)",
+                           "Regular Users (n)",
+                           "Regular Users (%)",
+                           "Super-Users (n)",
+                           "Super-Users (%)")
+finable <- knitr::kable(table, digits = 2 ,format = "html") %>%
+kable_styling("striped","hover", full_width = F) 
+return(finable)
+} 
+
+```
+###Age
+```{r kable_age, message=FALSE, warning=FALSE, results='asis'}
+table.style(dcast(melt(summarise.users(df.clean, q28)), Q ~ usertype + variable))
+```
+###Gender
+```{r kable_gender, message=FALSE, warning= FALSE, results='asis'}
+table.style(dcast(melt(summarise.users(df.clean, q27_clean)), Q ~ usertype + variable))
+```
+###Income
+```{r kable_income, message=FALSE, warning= FALSE, results='asis'}
+table.style(dcast(melt(summarise.users(df.clean, q36)), Q ~ usertype + variable))
+```
+###Education
+```{r kable_education, message=FALSE, warning= FALSE, results='asis'}
+table.style(dcast(melt(summarise.users(df.clean, q29)), Q ~ usertype + variable))
+```
+###Were you born in Canada?
+```{r kable_born, message=FALSE, warning= FALSE, results='asis'}
+table.style(dcast(melt(summarise.users(df.clean, q33)), Q ~ usertype + variable))
+```
+###Employement
+```{r kable_employement, message=FALSE, warning= FALSE, results='asis'}
+table.style(dcast(melt(summarise.users(df.clean, q31_clean)), Q ~ usertype + variable))
+```
+###How safe do you think cycling is in Vancouver?
+```{r kable_perceivedsafety, message=FALSE, warning= FALSE, results='asis'}
+table.style(dcast(melt(summarise.users(df.clean, q2)), Q ~ usertype + variable))
+```
+###Do you have a driver's licence?
+```{r kable_driverslicense, message=FALSE, warning= FALSE, results='asis'}
+table.style(dcast(melt(summarise.users(df.clean, q23)), Q ~ usertype + variable))
+```
+###Do you have a car share membership? 
+```{r kable_carshare, message=FALSE, warning= FALSE, results='asis'}
+table.style(dcast(melt(summarise.users(df.clean, q24_carshare_memb)), Q ~ usertype + variable))
+```
+###Are there bicycles for adults are kept in your household?
+```{r kable_bicycle, message=FALSE, warning= FALSE, results='asis'}
+table.style(dcast(melt(summarise.users(df.clean, q25_0_0)), Q ~ usertype + variable))
+```
+###Are there E-bikes are kept in your household? 
+```{r kable_ebikes, message=FALSE, warning= FALSE, results='asis'}
+table.style(dcast(melt(summarise.users(df.clean, q25_0_1)), Q ~ usertype + variable))
+```
+###Are there cars, vans, or trucks are kept in your household?
+```{r kable_cars, message=FALSE, warning= FALSE, results='asis'}
+table.style(dcast(melt(summarise.users(df.clean, q25_0_3)), Q ~ usertype + variable))
+```
+###Are there motorcycles are kept in your household?
+```{r kable_motorcycles, message=FALSE, warning= FALSE, results='asis'}
+table.style(dcast(melt(summarise.users(df.clean, q25_0_4)), Q ~ usertype + variable))
+```
+###Home inside bike share service area (500m buffers)
+```{r kable_home, message=FALSE, warning= FALSE, results='asis'}
+table.style(dcast(melt(summarise.users(df.clean, home_500)), Q ~ usertype + variable))
+```
+###Work inside bike share service area (500m buffers)
+```{r kable_work, message=FALSE, warning= FALSE, results='asis'}
+table.style(dcast(melt(summarise.users(df.clean, work_500)), Q ~ usertype + variable))
+```
+
+***
+#Bivariate Analysis
+####The logistic regression analysis is assesssing the odds of being a Super-User (1) in comparison the the reference group of Regular Users (0) 
+
+###Age
+#### Age 55+ is the reference group
+* Those aged 16 - 34 are 2.8 times more likely or 280% more likely to be a Super-User. 
+* Those aged 35 - 54 are 15% more likely to be a Super-User. The older you are the less likely you are to be a Super-User. 
+```{r star_age, results = 'asis', warning=FALSE, message=FALSE}
+stargazer( glm(df.clean$usertype_dummy ~ df.clean$q28, family='binomial'),
+           coef=list(exp(glm(df.clean$usertype_dummy ~ df.clean$q28, family='binomial')$coef)),
+           p = list(summary(glm(df.clean$usertype_dummy ~ df.clean$q28, family='binomial'))$coefficients[,4]),
+           t = list(summary(glm(df.clean$usertype_dummy ~ df.clean$q28, family='binomial'))$coefficients[,3]),
+           p.auto = FALSE,
+           t.auto = FALSE,
+           ci.custom = list(exp(confint(glm(df.clean$usertype_dummy ~ df.clean$q28, family='binomial')))),  
+           single.row = T, type="html", 
+           title = "Logistic Regression Results - Odds Ratio's",
+           dep.var.labels = "Super-Users",
+           covariate.labels = c( "35 - 54", 
+                                 "16 - 34"),
+           digits = 2,
+           font.size = "Huge")
+
+```
+
+###Gender
+#### Females are the reference group
+*  Males have 64% higher odds of being a Super-User
+```{r star_gender, results = 'asis', warning=FALSE, message=FALSE}
+stargazer( glm(df.clean$usertype_dummy ~ df.clean$q27, family='binomial'),
+           coef=list(exp(glm(df.clean$usertype_dummy ~ df.clean$q27, family='binomial')$coef)),
+           p = list(summary(glm(df.clean$usertype_dummy ~ df.clean$q27, family='binomial'))$coefficients[,4]),
+           t = list(summary(glm(df.clean$usertype_dummy ~ df.clean$q27, family='binomial'))$coefficients[,3]),
+           p.auto = FALSE,
+           t.auto = FALSE,
+           ci.custom = list(exp(confint(glm(df.clean$usertype_dummy ~ df.clean$q27, family='binomial')))), 
+           omit.stat=c("LL","ser","f"),
+           single.row = TRUE, 
+           type = "html", 
+           title = "Logistic Regression Results - Odds Ratio's",
+           dep.var.labels = "Super-Users",
+           covariate.labels = "(Gender) Male",
+           digits = 2,
+           font.size = "Huge")
+```
+
+###Income
+#### "No response" is the reference group 
+* Under 50,000 income groups are 3.4 times as likely to be a Super-User. 
+*Likelyhood of being a Super-User increases as income decreases* 
+```{r star_income, results = 'asis', warning=FALSE, message=FALSE}
+stargazer( glm(df.clean$usertype_dummy ~ df.clean$q36, family='binomial'),
+           coef=list(exp(glm(df.clean$usertype_dummy ~ df.clean$q36, family='binomial')$coef)),
+           p = list(summary(glm(df.clean$usertype_dummy ~ df.clean$q36, family='binomial'))$coefficients[,4]),
+           t = list(summary(glm(df.clean$usertype_dummy ~ df.clean$q36, family='binomial'))$coefficients[,3]),
+           p.auto = FALSE,
+           t.auto = FALSE,
+           ci.custom = list(exp(confint(glm(df.clean$usertype_dummy ~ df.clean$q36, family='binomial')))), 
+           omit.stat=c("LL","ser","f"),
+           single.row = TRUE, 
+           type = "html", 
+           title = "Logistic Regression Results - Odds Ratio's",
+           dep.var.labels = "Super-Users",
+           covariate.labels = c( "$50,000 - $99,999", 
+                                                 "Under $50,000",
+                                                  "No response"
+                                                  ),
+           digits = 2,
+           font.size = "Huge")
+
+```
+
+###Education
+#### "Graduate degree (e.g., Masters)" is the reference group
+* Those with a university degree have 34% higher odds of being a Super-User and those with a college/vocational/technical degree have 20% more odds.
+```{r star_education, results = 'asis', warning=FALSE, message=FALSE}
+stargazer( glm(df.clean$usertype_dummy ~ df.clean$q29, family='binomial'),
+           coef=list(exp(glm(df.clean$usertype_dummy ~ df.clean$q29, family='binomial')$coef)),
+           p = list(summary(glm(df.clean$usertype_dummy ~ df.clean$q29, family='binomial'))$coefficients[,4]),
+           t = list(summary(glm(df.clean$usertype_dummy ~ df.clean$q29, family='binomial'))$coefficients[,3]),
+           p.auto = FALSE,
+           t.auto = FALSE,
+           ci.custom = list(exp(confint(glm(df.clean$usertype_dummy ~ df.clean$q29, family='binomial')))), 
+           omit.stat=c("LL","ser","f"),
+           single.row = TRUE, 
+           type = "html", 
+           title = "Logistic Regression Results - Odds Ratio's",
+           dep.var.labels = "Super-Users",
+           covariate.labels = c("Graduated university",
+                                 "College/vocational/technical school",
+                                 "Some university",
+                                 "Highschool or less"),
+           digits = 2,
+           font.size = "Huge")
+
+```
+
+###Were you born in Canada?
+#### "Yes" is the reference group   
+* Those who were not born in Canada are 2.3 times more likely to be a Super-User!
+```{r star_ethnicity, results = 'asis', warning=FALSE, message=FALSE}
+stargazer( glm(df.clean$usertype_dummy ~ df.clean$q33, family='binomial'),
+           coef=list(exp(glm(df.clean$usertype_dummy ~ df.clean$q33, family='binomial')$coef)),
+           p = list(summary(glm(df.clean$usertype_dummy ~ df.clean$q33, family='binomial'))$coefficients[,4]),
+           t = list(summary(glm(df.clean$usertype_dummy ~ df.clean$q33, family='binomial'))$coefficients[,3]),
+           p.auto = FALSE,
+           t.auto = FALSE,
+           ci.custom = list(exp(confint(glm(df.clean$usertype_dummy ~ df.clean$q33, family='binomial')))), 
+           omit.stat=c("LL","ser","f"),
+           single.row = TRUE, 
+           type = "html", 
+           title = "Logistic Regression Results - Odds Ratio's",
+           dep.var.labels = "Super-Users",
+           covariate.labels = c("No"),
+           digits = 2,
+           font.size = "Huge")
+```
+
+###Employement
+#### Works is the reference group
+* Other = 'Student','Retired','Homemaker',and 'Unemployed' 
+* Those that don't work are 17% more likely to be a Super-User
+```{r star_employement, results = 'asis', warning=FALSE, message=FALSE}
+stargazer( glm(df.clean$usertype_dummy ~ df.clean$q31_clean, family='binomial'),
+           coef=list(exp(glm(df.clean$usertype_dummy ~ df.clean$q31_clean, family='binomial')$coef)),
+           p = list(summary(glm(df.clean$usertype_dummy ~ df.clean$q31_clean, family='binomial'))$coefficients[,4]),
+           t = list(summary(glm(df.clean$usertype_dummy ~ df.clean$q31_clean, family='binomial'))$coefficients[,3]),
+           p.auto = FALSE,
+           t.auto = FALSE,
+           ci.custom = list(exp(confint(glm(df.clean$usertype_dummy ~ df.clean$q31_clean, family='binomial')))), 
+           omit.stat=c("LL","ser","f"),
+           single.row = TRUE, 
+           type = "html", 
+           title = "Logistic Regression Results - Odds Ratio's",
+           dep.var.labels = "Super-Users",
+           covariate.labels = c("Unemployed/Other"),
+           digits = 2,
+           font.size = "Huge")
+```
+
+###How safe do you think cycling is in Vancouver?
+#### "Neither safe nor unsafe" is the reference group 
+* Likelyhood of being a Super-User doesn't change? 
+```{r star_perceivedsafety, results = 'asis', warning=FALSE, message=FALSE}
+stargazer( glm(df.clean$usertype_dummy ~ df.clean$q2, family='binomial'),
+           coef=list(exp(glm(df.clean$usertype_dummy ~ df.clean$q2, family='binomial')$coef)),
+           p = list(summary(glm(df.clean$usertype_dummy ~ df.clean$q2, family='binomial'))$coefficients[,4]),
+           t = list(summary(glm(df.clean$usertype_dummy ~ df.clean$q2, family='binomial'))$coefficients[,3]),
+           p.auto = FALSE,
+           t.auto = FALSE,
+           ci.custom = list(exp(confint(glm(df.clean$usertype_dummy ~ df.clean$q2, family='binomial')))), 
+           omit.stat=c("LL","ser","f"),
+           single.row = TRUE, 
+           type = "html", 
+           title = "Logistic Regression Results - Odds Ratio's",
+           dep.var.labels = "Super-Users",
+           covariate.labels =  c("Dangerous",
+                                   "Safe"),
+           digits = 2,
+           font.size = "Huge")
+
+```
+
+###Do you have a driver's license?
+#### "Yes" is the reference group 
+* Those without a drivers license are 2.6 times or 260% more likely to be a Super-User. 
+```{r star_driverslicense, results = 'asis', warning=FALSE, message=FALSE}
+stargazer( glm(df.clean$usertype_dummy ~ df.clean$q23, family='binomial'),
+           coef=list(exp(glm(df.clean$usertype_dummy ~ df.clean$q23, family='binomial')$coef)),
+           p = list(summary(glm(df.clean$usertype_dummy ~ df.clean$q23, family='binomial'))$coefficients[,4]),
+           t = list(summary(glm(df.clean$usertype_dummy ~ df.clean$q23, family='binomial'))$coefficients[,3]),
+           p.auto = FALSE,
+           t.auto = FALSE,
+           ci.custom = list(exp(confint(glm(df.clean$usertype_dummy ~ df.clean$q23, family='binomial')))), 
+           omit.stat=c("LL","ser","f"),
+           single.row = TRUE, 
+           type = "html", 
+           title = "Logistic Regression Results - Odds Ratio's",
+           dep.var.labels = "Super-Users",
+           covariate.labels = c("No"), 
+           digits = 2,
+           font.size = "Huge")
+
+```
+
+###Do you have a car share membership? 
+#### "Yes" is the reference group
+* Those without a car share membership are 67% more likely to be a Super-User.  
+```{r star_carshare, results = 'asis', warning=FALSE, message=FALSE}
+stargazer( glm(df.clean$usertype_dummy ~ df.clean$q24_carshare_memb, family='binomial'),
+           coef=list(exp(glm(df.clean$usertype_dummy ~ df.clean$q24_carshare_memb, family='binomial')$coef)),
+           p = list(summary(glm(df.clean$usertype_dummy ~ df.clean$q24_carshare_memb, family='binomial'))$coefficients[,4]),
+           t = list(summary(glm(df.clean$usertype_dummy ~ df.clean$q24_carshare_memb, family='binomial'))$coefficients[,3]),
+           p.auto = FALSE,
+           t.auto = FALSE,
+           ci.custom = list(exp(confint(glm(df.clean$usertype_dummy ~ df.clean$q24_carshare_memb, family='binomial')))), 
+           omit.stat=c("LL","ser","f"),
+           single.row = TRUE, 
+           type = "html", 
+           title = "Logistic Regression Results - Odds Ratio's",
+           dep.var.labels = "Super-Users",
+           covariate.labels = c("No"), 
+           digits = 2,
+           font.size = "Huge")
+
+```
+
+###Do you have an adult bicycle in your household?
+#### "Yes" is the reference group 
+* Those without access to an adult bicycle are twice as likely as those with a bicycle to be Super-Users.
+```{r star_bicycle, results = 'asis', warning=FALSE, message=FALSE}
+stargazer( glm(df.clean$usertype_dummy ~ df.clean$q25_0_0, family='binomial'),
+           coef=list(exp(glm(df.clean$usertype_dummy ~ df.clean$q25_0_0, family='binomial')$coef)),
+           p = list(summary(glm(df.clean$usertype_dummy ~ df.clean$q25_0_0, family='binomial'))$coefficients[,4]),
+           t = list(summary(glm(df.clean$usertype_dummy ~ df.clean$q25_0_0, family='binomial'))$coefficients[,3]),
+           p.auto = FALSE,
+           t.auto = FALSE,
+           ci.custom = list(exp(confint(glm(df.clean$usertype_dummy ~ df.clean$q25_0_0, family='binomial')))), 
+           omit.stat=c("LL","ser","f"),
+           single.row = TRUE, 
+           type = "html", 
+           title = "Logistic Regression Results - Odds Ratio's",
+           dep.var.labels = "Super-Users",
+           covariate.labels = c("No"), 
+           digits = 2,
+           font.size = "Huge")
+```
+
+###Do you have an e-bike in your household?
+#### "Yes" is the reference group 
+* Those without an e-bike are 30% more likely to be a Super-User.
+```{r star_ebike, results = 'asis', warning=FALSE, message=FALSE}
+stargazer( glm(df.clean$usertype_dummy ~ df.clean$q25_0_1, family='binomial'),
+           coef=list(exp(glm(df.clean$usertype_dummy ~ df.clean$q25_0_1, family='binomial')$coef)),
+           p = list(summary(glm(df.clean$usertype_dummy ~ df.clean$q25_0_1, family='binomial'))$coefficients[,4]),
+           t = list(summary(glm(df.clean$usertype_dummy ~ df.clean$q25_0_1, family='binomial'))$coefficients[,3]),
+           p.auto = FALSE,
+           t.auto = FALSE,
+           ci.custom = list(exp(confint(glm(df.clean$usertype_dummy ~ df.clean$q25_0_1, family='binomial')))), 
+           omit.stat=c("LL","ser","f"),
+           single.row = TRUE, 
+           type = "html", 
+           title = "Logistic Regression Results - Odds Ratio's",
+           dep.var.labels = "Super-Users",
+           covariate.labels = c("No"), 
+           digits = 2,
+           font.size = "Huge")
+
+
+```
+
+###Are there cars, vans, or trucks are kept in your household?
+* Those without a car are 2.4 times more likely to be a Super-User
+```{r star_cars, results = 'asis', warning=FALSE, message=FALSE}
+stargazer( glm(df.clean$usertype_dummy ~ df.clean$q25_0_3, family='binomial'),
+           coef=list(exp(glm(df.clean$usertype_dummy ~ df.clean$q25_0_3, family='binomial')$coef)),
+           p = list(summary(glm(df.clean$usertype_dummy ~ df.clean$q25_0_3, family='binomial'))$coefficients[,4]),
+           t = list(summary(glm(df.clean$usertype_dummy ~ df.clean$q25_0_3, family='binomial'))$coefficients[,3]),
+           p.auto = FALSE,
+           t.auto = FALSE,
+           ci.custom = list(exp(confint(glm(df.clean$usertype_dummy ~ df.clean$q25_0_3, family='binomial')))), 
+           omit.stat=c("LL","ser","f"),
+           single.row = TRUE, 
+           type = "html", 
+           title = "Logistic Regression Results - Odds Ratio's",
+           dep.var.labels = "Super-Users",
+           covariate.labels = c("No"), 
+           digits = 2,
+           font.size = "Huge")
+```
+
+###Are there motorcycles are kept in your household?
+* Those without a motorcycle are 3.8 times more likely to be a Super-User
+```{r star_motorcycles, results = 'asis', warning=FALSE, message=FALSE}
+stargazer( glm(df.clean$usertype_dummy ~ df.clean$q25_0_4, family='binomial'),
+           coef=list(exp(glm(df.clean$usertype_dummy ~ df.clean$q25_0_4, family='binomial')$coef)),
+           p = list(summary(glm(df.clean$usertype_dummy ~ df.clean$q25_0_4, family='binomial'))$coefficients[,4]),
+           t = list(summary(glm(df.clean$usertype_dummy ~ df.clean$q25_0_4, family='binomial'))$coefficients[,3]),
+           p.auto = FALSE,
+           t.auto = FALSE,
+           ci.custom = list(exp(confint(glm(df.clean$usertype_dummy ~ df.clean$q25_0_4, family='binomial')))), 
+           omit.stat=c("LL","ser","f"),
+           single.row = TRUE, 
+           type = "html", 
+           title = "Logistic Regression Results - Odds Ratio's",
+           dep.var.labels = "Super-Users",
+           covariate.labels = c("No"), 
+           digits = 2,
+           font.size = "Huge")
+```
+###Home inside bike share service area (500m buffers)
+#### "No" is the reference group 
+*No=home not located within 500m of a bike share docking station*
+*Yes=home located within 500m of a bike share docking station*
+
+* Those with homes in proximity to a docking station were 2.5 times more likely to be a Super-User.
+```{r star_home, results = 'asis', warning=FALSE, message=FALSE}
+stargazer( glm(df.clean$usertype_dummy ~ df.clean$home_500, family='binomial'),
+           coef=list(exp(glm(df.clean$usertype_dummy ~ df.clean$home_500, family='binomial')$coef)),
+           p = list(summary(glm(df.clean$usertype_dummy ~ df.clean$home_500, family='binomial'))$coefficients[,4]),
+           t = list(summary(glm(df.clean$usertype_dummy ~ df.clean$home_500, family='binomial'))$coefficients[,3]),
+           p.auto = FALSE,
+           t.auto = FALSE,
+           ci.custom = list(exp(confint(glm(df.clean$usertype_dummy ~ df.clean$home_500, family='binomial')))), 
+           omit.stat=c("LL","ser","f"),
+           single.row = TRUE, 
+           type = "html", 
+           title = "Logistic Regression Results - Odds Ratio's",
+           dep.var.labels = "Super-Users",
+           covariate.labels = c("Yes",
+                                "No Response"),
+           digits = 2,
+           font.size = "Huge")
+    
+   
+```
+
+###Work inside bike share service area (500m buffers)
+#### "No" is the reference group 
+*No=work not located within 500m of a bike share docking station*
+*Yes=work located within 500m of a bike share docking station*
+
+* Those with Work places in proximity to a docking station were 2.2 times more likely to be a Super-User.
+```{r star_work, results = 'asis', warning=FALSE, message=FALSE}
+stargazer( glm(df.clean$usertype_dummy ~ df.clean$work_500, family='binomial'),
+           coef=list(exp(glm(df.clean$usertype_dummy ~ df.clean$work_500, family='binomial')$coef)),
+           p = list(summary(glm(df.clean$usertype_dummy ~ df.clean$work_500, family='binomial'))$coefficients[,4]),
+           t = list(summary(glm(df.clean$usertype_dummy ~ df.clean$work_500, family='binomial'))$coefficients[,3]),
+           p.auto = FALSE,
+           t.auto = FALSE,
+           ci.custom = list(exp(confint(glm(df.clean$usertype_dummy ~ df.clean$work_500, family='binomial')))), 
+           omit.stat=c("LL","ser","f"),
+           single.row = TRUE, 
+           type = "html", 
+           title = "Logistic Regression Results - Odds Ratio's",
+           dep.var.labels = "Super-Users",
+           covariate.labels = c("Yes",
+                                "No work/study",
+                                "No Response"),
+           
+           digits = 2,
+           font.size = "Huge")
+```
+
+***
+#Multivariate Analysis 
+#### All variables significant at the 0.1 level in the bivaraite analysis were included in a multiple regression model. AIC values were used to perform a stepwise model selection with the function of "stepAIC". 
+```{r star_AIC, echo=TRUE, message=FALSE, warning=FALSE}
+
+model1 <- glm(df.clean$usertype_dummy ~ 
+                 df.clean$q28 +  #Age 
+                 df.clean$q27 +  #Gender 
+                 df.clean$q36 +  #Income
+                 df.clean$q33 +  #Canada
+                 df.clean$q23 + # Drivers License
+                 df.clean$q24_carshare_memb + #Carshare
+                 df.clean$q25_0_0 + #Bicyle
+                 df.clean$q25_0_3 + #Car
+                 df.clean$q25_0_4 + #Motorcycle                
+                 df.clean$home_500 + #home
+                 df.clean$work_500, #work
+                 family='binomial')
+
+model1AIC <- stepAIC(model1, direction = "both", trace=FALSE)
+model1AIC$anova
+
+# FINAL MODEL 
+model2 <- glm(df.clean$usertype_dummy ~ 
+    df.clean$q28 + #Age
+    df.clean$q27 + #Gender
+    df.clean$q36 + #Income
+    df.clean$q33 + #Canada
+    df.clean$q24_carshare_memb + #Carshare
+    df.clean$q25_0_3 + #Car
+    df.clean$q25_0_4 + #Motorcycle         
+    df.clean$home_500 + #Home
+    df.clean$work_500, #Work
+    family='binomial')
+
+```
+
+#### The full model is the initial multivariable model that was fed into the stepwise AIC function. The best fit model is the final model used based on the lowest AIC value. 
+```{r star_Model1, results = 'asis', warning=FALSE, message=FALSE}
+stargazer(model1,model2,
+           coef = list(exp(model1$coef),exp(model2$coef)),
+           p = list(summary(model1)$coefficients[,4],summary(model2)$coefficients[,4]),
+           t = list(summary(model1)$coefficients[,3],summary(model2)$coefficients[,3]),
+           p.auto = FALSE,
+           t.auto = FALSE,
+           ci.custom = list(exp(confint(model1)),exp(confint(model2))), 
+           omit.stat=c("LL","ser","f"),
+           single.row = TRUE, 
+           type = "html", 
+           title = "Logistic Regression Results - Odds Ratio's",
+           dep.var.labels = "Super-Users",
+           column.labels = c("Full Model", "Best Fit Model"),
+           covariate.labels = c("(Age) 35 - 54",
+                                "16 - 34",
+                                "(Gender) Male",
+                                "(Income) $50,000 - $99,999",
+                                "Under $50,000",
+                                "No Response",
+                                "(Born in Canada?) No",
+                                "(Driver's License?) No",                                
+                                "(Car share membership?) No",
+                                "(Bicycle in household?) No",
+                                "(Car in household?) No",                               
+                                "(Motorcycle in household?) No",                               
+                                "(Home 500) Yes",
+                                "No Response",
+                                "(Work 500) Yes",
+                                "No work/study",
+                                "No Response"),
+           digits = 2,
+           font.size = "Huge")
+                     
+
+```
+#Conclusion
+####The findings of this project have suggested a very distinct demographic profile for super-users of the Mobi bike share system in comparison to regular users. Super-users are more likely to have integrated Mobi bikes into their day-to-day travel behaviours and have become reliant on the system, as this population typically does not own a private vehicle. Furthermore, a super-user is on average, a young male with an income below $50,000 and lives and works within 500 m of a bike share docking station. This paper has highlighted gaps where usage of bike share can be increased by understanding the barriers to bike share for Mobi members that are less likely to be super-users such as woman and those living outside of the bike share service areas. 
